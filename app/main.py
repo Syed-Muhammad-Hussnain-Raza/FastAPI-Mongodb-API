@@ -11,25 +11,15 @@ from typing import Optional, List, Dict, Any
 import time
 from collections import defaultdict
 
-# -----------------------------
-# Configuration
-# -----------------------------
 MONGO_URL = "mongodb://localhost:27017"
 DB_NAME = "goodreadsDB"
 API_KEY = "secret123"
 RATE_LIMIT_REQUESTS = 60
 RATE_LIMIT_WINDOW = 60  # seconds
 
-# -----------------------------
-# Database Connection
-# -----------------------------
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
-# -----------------------------
-# In-Memory Storage for Rate Limiting and Metrics
-# Note: These reset on server restart. For production, use Redis or similar.
-# -----------------------------
 rate_limit_store: Dict[str, List[float]] = defaultdict(list)
 metrics_store = {
     "total_requests": 0,
@@ -38,9 +28,6 @@ metrics_store = {
     "status_codes": defaultdict(int)
 }
 
-# -----------------------------
-# Pydantic Models
-# -----------------------------
 class Book(BaseModel):
     book_id: int
     title: str
@@ -65,20 +52,15 @@ class PaginatedResponse(BaseModel):
     page_size: int
     total: int
 
-# -----------------------------
-# FastAPI App
-# -----------------------------
+
 app = FastAPI(
     title="Goodreads API",
     version="1.0.0",
     description="MongoDB-backed REST API for GoodBooks-10k dataset"
 )
 
-# -----------------------------
-# Helper Functions
-# -----------------------------
+# helper functions
 def update_metrics(endpoint: str, latency_ms: float, status_code: int):
-    """Update metrics store with request data"""
     metrics_store["total_requests"] += 1
     metrics_store["requests_by_endpoint"][endpoint] += 1
     metrics_store["status_codes"][status_code] += 1
@@ -96,10 +78,7 @@ def update_metrics(endpoint: str, latency_ms: float, status_code: int):
         metrics_store["latency_histogram"][">1000ms"] += 1
 
 def check_rate_limit(ip: str, limit: int = RATE_LIMIT_REQUESTS, window_seconds: int = RATE_LIMIT_WINDOW) -> bool:
-    """
-    Check if IP has exceeded rate limit.
-    Returns True if request is allowed, False if limit exceeded.
-    """
+
     now = time.time()
     cutoff = now - window_seconds
     
@@ -131,17 +110,9 @@ async def paginate_with_query(
     docs = await cursor.skip((page-1)*page_size).limit(page_size).to_list(length=page_size)
     return {"items": docs, "page": page, "page_size": page_size, "total": total}
 
-# -----------------------------
 # Middleware: Logging, Rate Limiting, and Metrics
-# -----------------------------
 @app.middleware("http")
 async def request_middleware(request: Request, call_next):
-    """
-    Middleware for:
-    - Rate limiting (60 req/min per IP, excluding health/metrics endpoints)
-    - JSONL logging (route, params, status, latency, IP, timestamp)
-    - Metrics collection (counters, histograms)
-    """
     start = time.time()
     client_ip = request.client.host if request.client else "unknown"
     
@@ -160,7 +131,7 @@ async def request_middleware(request: Request, call_next):
     response = await call_next(request)
     latency_ms = round((time.time() - start) * 1000, 2)
     
-    # JSONL Logging (as required by assignment)
+    # JSONL Logging
     log_entry = {
         "route": request.url.path,
         "params": dict(request.query_params),
@@ -176,18 +147,13 @@ async def request_middleware(request: Request, call_next):
     
     return response
 
-# -----------------------------
-# Authentication Dependency
-# -----------------------------
+# Authentication
 async def verify_api_key(x_api_key: str = Header(..., description="API key for authentication")):
-    """Verify API key for protected endpoints"""
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
     return x_api_key
 
-# -----------------------------
-# Nice-to-Have: Health Check
-# -----------------------------
+# Health Check
 @app.get(
     "/healthz",
     tags=["Monitoring"],
@@ -195,10 +161,6 @@ async def verify_api_key(x_api_key: str = Header(..., description="API key for a
     description="Returns service health status with MongoDB connectivity check"
 )
 async def health_check():
-    """
-    Health check endpoint with MongoDB ping and build info.
-    Required by Section 5: Nice-to-have features.
-    """
     try:
         # Ping MongoDB
         await db.command("ping")
@@ -231,21 +193,15 @@ async def health_check():
             }
         )
 
-# -----------------------------
-# Nice-to-Have: Metrics
-# -----------------------------
+# Metrics
 @app.get(
     "/metrics",
     tags=["Monitoring"],
     summary="API metrics",
     description="Returns request counters and latency histograms"
 )
+
 async def get_metrics():
-    """
-    Get API metrics including request counters and latency histograms.
-    Required by Section 5: Nice-to-have features.
-    Note: Metrics reset on server restart (in-memory storage).
-    """
     return {
         "total_requests": metrics_store["total_requests"],
         "requests_by_endpoint": dict(metrics_store["requests_by_endpoint"]),
@@ -255,12 +211,9 @@ async def get_metrics():
         "note": "Metrics are stored in-memory and reset on server restart"
     }
 
-# -----------------------------
 # Root and Debug Endpoints
-# -----------------------------
 @app.get("/", tags=["General"])
 async def root():
-    """Root endpoint"""
     return {
         "message": "Goodreads API",
         "version": "1.0.0",
@@ -272,7 +225,6 @@ async def root():
 
 @app.get("/debug/counts", tags=["Debug"], summary="Collection counts")
 async def debug_counts():
-    """Get document counts for all collections (useful during development)"""
     counts = {}
     for name in ["books", "ratings", "tags", "book_tags", "to_read"]:
         try:
@@ -281,9 +233,7 @@ async def debug_counts():
             counts[name] = None
     return {"database": DB_NAME, "collections": counts}
 
-# -----------------------------
 # GET /books
-# -----------------------------
 @app.get(
     "/books",
     response_model=PaginatedResponse,
@@ -292,20 +242,17 @@ async def debug_counts():
     description="Search and filter books with pagination, sorting, and tag filtering"
 )
 async def get_books(
-    q: Optional[str] = Query(None, description="Search in title or authors (case-insensitive)"),
-    tag: Optional[str] = Query(None, description="Filter by tag name (partial match, case-insensitive)"),
+    q: Optional[str] = Query(None, description="Search in title or authors"),
+    tag: Optional[str] = Query(None, description="Filter by tag name"),
     min_avg: Optional[float] = Query(None, description="Minimum average rating"),
     year_from: Optional[int] = Query(None, description="Publication year from (inclusive)"),
     year_to: Optional[int] = Query(None, description="Publication year to (inclusive)"),
     sort: Optional[str] = Query("title", description="Sort field: avg, ratings_count, year, title"),
     order: Optional[str] = Query("asc", description="Sort order: asc or desc"),
-    page: int = Query(1, ge=1, description="Page number (starts at 1)"),
-    page_size: int = Query(10, ge=1, le=100, description="Items per page (max 100)")
+    page: int = Query(1, ge=1, description="Page number"),
+    page_size: int = Query(10, ge=1, le=100, description="Items per page")
 ):
-    """
-    List books with filtering, sorting, and pagination.
-    Supports text search, tag filtering, rating filtering, and year range filtering.
-    """
+    
     query: Dict[str, Any] = {}
     
     # Text search in title or authors
@@ -368,9 +315,7 @@ async def get_books(
     
     return await paginate_with_query("books", query, sort_field, sort_dir, page, page_size)
 
-# -----------------------------
 # GET /books/{book_id}
-# -----------------------------
 @app.get(
     "/books/{book_id}",
     response_model=Book,
@@ -384,19 +329,13 @@ async def get_book(book_id: int = Path(..., description="Book ID")):
         raise HTTPException(status_code=404, detail="Book not found")
     return book
 
-# -----------------------------
 # GET /books/{book_id}/tags
-# -----------------------------
 @app.get(
     "/books/{book_id}/tags",
     tags=["Books"],
     summary="Get book tags"
 )
 async def get_book_tags(book_id: int = Path(..., description="Book ID")):
-    """
-    Get all tags associated with a book.
-    Joins: books -> book_tags -> tags
-    """
     book = await db.books.find_one({"book_id": book_id}, {"_id": 0})
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
@@ -426,19 +365,13 @@ async def get_book_tags(book_id: int = Path(..., description="Book ID")):
     tags = await db.book_tags.aggregate(pipeline).to_list(length=100)
     return {"book_id": book_id, "tags": tags}
 
-# -----------------------------
 # GET /authors/{author_name}/books
-# -----------------------------
 @app.get(
     "/authors/{author_name}/books",
     tags=["Authors"],
     summary="Get books by author"
 )
-async def get_books_by_author(author_name: str = Path(..., description="Author name (case-insensitive partial match)")):
-    """
-    Get all books by a specific author (case-insensitive partial match).
-    Returns up to 200 books for safety.
-    """
+async def get_books_by_author(author_name: str = Path(..., description="Author name")):
     query = {"authors": {"$regex": author_name, "$options": "i"}}
     cursor = db.books.find(query, {"_id": 0}).limit(200)
     results = await cursor.to_list(length=200)
@@ -448,9 +381,7 @@ async def get_books_by_author(author_name: str = Path(..., description="Author n
     
     return results
 
-# -----------------------------
 # GET /tags
-# -----------------------------
 @app.get(
     "/tags",
     response_model=PaginatedResponse,
@@ -461,10 +392,7 @@ async def get_tags(
     page: int = Query(1, ge=1, description="Page number"),
     page_size: int = Query(10, ge=1, le=100, description="Items per page")
 ):
-    """
-    Get paginated list of all tags with book counts.
-    Includes the number of books associated with each tag.
-    """
+
     pipeline = [
         {"$lookup": {
             "from": "book_tags",
@@ -488,20 +416,13 @@ async def get_tags(
     
     return {"items": tags, "page": page, "page_size": page_size, "total": total}
 
-# -----------------------------
 # GET /users/{user_id}/to-read
-# -----------------------------
 @app.get(
     "/users/{user_id}/to-read",
     tags=["Users"],
     summary="Get user's to-read list"
 )
 async def get_to_read(user_id: int = Path(..., description="User ID")):
-    """
-    Get user's to-read list.
-    Note: This implementation enhances the response by joining with books collection
-    to provide book details (title, authors) instead of just book_ids.
-    """
     docs = await db.to_read.find({"user_id": user_id}, {"_id": 0}).to_list(length=500)
     
     if not docs:
@@ -517,18 +438,13 @@ async def get_to_read(user_id: int = Path(..., description="User ID")):
     
     return books
 
-# -----------------------------
 # GET /books/{book_id}/ratings/summary
-# -----------------------------
 @app.get(
     "/books/{book_id}/ratings/summary",
     tags=["Ratings"],
     summary="Get ratings summary for a book"
 )
 async def get_ratings_summary(book_id: int = Path(..., description="Book ID")):
-    """
-    Get ratings summary for a book including average, count, and histogram (1-5).
-    """
     book = await db.books.find_one({"book_id": book_id}, {"_id": 0})
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
@@ -572,9 +488,7 @@ async def get_ratings_summary(book_id: int = Path(..., description="Book ID")):
         "histogram": histogram
     }
 
-# -----------------------------
-# POST /ratings (Protected)
-# -----------------------------
+# POST /ratings
 @app.post(
     "/ratings",
     tags=["Ratings"],
@@ -584,12 +498,6 @@ async def add_rating(
     rating: Rating,
     x_api_key: str = Header(..., description="API key for authentication")
 ):
-    """
-    Add or update a user's rating for a book (protected endpoint).
-    Requires x-api-key header.
-    Upserts on duplicate (user_id, book_id) pair.
-    Returns 201 on creation, 200 on update.
-    """
     # Verify API key
     if x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="Invalid API Key")
@@ -618,9 +526,7 @@ async def add_rating(
         }
     )
 
-# -----------------------------
-# Nice-to-Have: Recommendations
-# -----------------------------
+# Recommendations
 @app.get(
     "/users/{user_id}/recommendations",
     tags=["Users"],
@@ -630,19 +536,6 @@ async def get_recommendations(
     user_id: int = Path(..., description="User ID"),
     top_k: int = Query(20, ge=1, le=100, description="Number of recommendations to return")
 ):
-    """
-    Get personalized book recommendations based on user's favorite tags.
-    
-    Algorithm:
-    1. Find user's highly-rated books (rating >= 4)
-    2. Extract tags from those books
-    3. Find other highly-rated books with similar tags
-    4. Exclude books the user has already rated
-    
-    Fallback: If user has no ratings, return top-rated books overall.
-    
-    Required by Section 5: Nice-to-have features.
-    """
     try:
         # Get user's high ratings (4-5 stars)
         user_ratings = await db.ratings.find(
@@ -754,31 +647,23 @@ async def get_recommendations(
             detail=f"Error generating recommendations: {str(e)}"
         )
 
-# -----------------------------
 # Custom Exception Handler
-# -----------------------------
 @app.exception_handler(HTTPException)
 async def custom_http_exception_handler(request: Request, exc: HTTPException):
-    """Custom error handler to ensure consistent error format"""
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail}
     )
 
-# -----------------------------
 # Startup Event
-# -----------------------------
 @app.on_event("startup")
 async def startup_event():
-    """Startup tasks"""
-    print(f"🚀 Goodreads API starting...")
-    print(f"📊 Database: {DB_NAME}")
-    print(f"🔒 Rate limit: {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW}s")
-    print(f"📖 Docs available at: http://localhost:8000/docs")
+    print(f"Goodreads API starting...")
+    print(f"Database: {DB_NAME}")
+    print(f"Rate limit: {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW}s")
+    print(f"Docs available at: http://localhost:8000/docs")
 
-# -----------------------------
 # Shutdown Event
-# -----------------------------
 @app.on_event("shutdown")
 async def shutdown_event():
     client.close()
